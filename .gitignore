@@ -14,7 +14,7 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-*.spec
+# Note: *.spec is NOT ignored — installer/DesktopWorkspaces.spec is source
 
 # Logs and runtime data
 logs/
@@ -35,10 +35,10 @@ Desktop.ini
 *.suo
 *.user
 
-# Installer output
+# Installer output (built artefacts — source scripts are in installer/)
 *.exe
 *.msi
-*.nsi
+# Note: *.nsi is NOT ignored — installer/DesktopWorkspaces.nsi is source
 
 # Claude Code local memory (machine-specific)
 .claude/

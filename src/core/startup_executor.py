@@ -55,12 +55,24 @@ class StartupExecutor:
         self._launch_shop_window()
 
     def _launch_shop_window(self) -> None:
-        """Spawn the shop window as a detached process so it persists after startup exits."""
+        """Spawn the shop window as a detached process so it persists after startup exits.
+
+        Supports both development (pythonw + main.py) and PyInstaller bundle
+        (DesktopWorkspaces.exe lives alongside DesktopWorkspacesStartup.exe).
+        """
         try:
-            pythonw = Path(sys.executable).parent / "pythonw.exe"
-            main_py = Path(__file__).resolve().parents[2] / "main.py"
+            if getattr(sys, "frozen", False):
+                # PyInstaller bundle — shop window exe is in the same folder
+                shop_exe = Path(sys.executable).parent / "DesktopWorkspaces.exe"
+                cmd = [str(shop_exe)]
+            else:
+                # Running from source
+                pythonw = Path(sys.executable).parent / "pythonw.exe"
+                main_py = Path(__file__).resolve().parents[2] / "main.py"
+                cmd = [str(pythonw), str(main_py)]
+
             subprocess.Popen(
-                [str(pythonw), str(main_py)],
+                cmd,
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
                 close_fds=True,
             )
