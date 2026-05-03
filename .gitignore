@@ -1,0 +1,51 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Logs and runtime data
+logs/
+*.log
+
+# App data (user-specific, not source)
+data/profile.json
+data/config.json
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Installer output
+*.exe
+*.msi
+*.nsi
+
+# Claude Code local memory (machine-specific)
+.claude/
+
+# Context / session docs (working notes, not shipped)
+"workspace phase 1 completed context.md"
+"workspace phase 2 brief.md"
+"workspace phase 2 plan.md"
+"workspace phase 2 session context.md"
+"Desktop Workspaces — Proof of Concept .md"
