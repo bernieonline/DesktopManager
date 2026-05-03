@@ -1,4 +1,5 @@
 import sys
+import ctypes
 
 
 def main():
@@ -14,6 +15,10 @@ def main():
         window.show()
         sys.exit(app.exec())
     else:
+        # OleInitialize must be called before QApplication on Windows.
+        # PySide6 6.11.0 does not reliably call it before RegisterDragDrop,
+        # which silently breaks OLE drag-and-drop (IDropTarget never fires).
+        ctypes.windll.ole32.OleInitialize(None)
         from PySide6.QtWidgets import QApplication
         from src.ui.shop_window import ShopWindow
         app = QApplication(sys.argv)

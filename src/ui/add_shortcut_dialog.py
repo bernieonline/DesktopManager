@@ -82,7 +82,7 @@ class AddShortcutDialog:
         Show a small dialog pre-filled with auto_name.
         Returns the confirmed name string, or None if cancelled.
         """
-        dialog = _NameDialog(auto_name, path, self._parent)
+        dialog = NameConfirmDialog(auto_name, path, self._parent)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return dialog.get_name()
         return None
@@ -136,7 +136,7 @@ class _PickTypeDialog(QDialog):
         return self._choice
 
 
-class _NameDialog(QDialog):
+class NameConfirmDialog(QDialog):
     """Compact dialog: confirm or edit the shortcut label."""
 
     def __init__(self, auto_name: str, path: str, parent=None):

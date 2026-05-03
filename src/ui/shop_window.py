@@ -13,6 +13,8 @@ Design:
 """
 
 import os
+import ctypes
+import ctypes.wintypes
 from datetime import datetime
 
 from PySide6.QtWidgets import (
@@ -25,9 +27,12 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 from src.core.config_manager import ConfigManager
 from src.core.virtual_desktop_manager import VirtualDesktopManager
-from src.core.shortcut_manager import validate_path
+from src.core.shortcut_manager import (
+    validate_path, extract_lnk_target, get_display_name, create_lnk, DESKTOP_DIR
+)
 from src.core.shortcut_validator import ShortcutValidator
 from src.ui.shortcut_tile import ShortcutTile
+from src.ui.add_shortcut_dialog import NameConfirmDialog
 from src.ui.styles import (
     BRONZE, TEXT_PRIMARY, TEXT_MUTED, BG_DARK, BORDER,
     STATUS_AVAILABLE, STATUS_UNAVAILABLE, STATUS_DEAD
@@ -35,6 +40,19 @@ from src.ui.styles import (
 from src.utils.logger import get_logger
 
 logger = get_logger("ShopWindow")
+
+_WM_MOUSEACTIVATE = 0x0021
+_MA_NOACTIVATE    = 3       # return value: don't activate on click
+
+class _MSG(ctypes.Structure):
+    _fields_ = [
+        ("hwnd",    ctypes.wintypes.HWND),
+        ("message", ctypes.c_uint),
+        ("wParam",  ctypes.wintypes.WPARAM),
+        ("lParam",  ctypes.wintypes.LPARAM),
+        ("time",    ctypes.wintypes.DWORD),
+        ("pt",      ctypes.wintypes.POINT),
+    ]
 
 TILES_PER_ROW = 3
 CORNER_RADIUS = 10
@@ -102,9 +120,11 @@ class ShopWindow(QWidget):
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.Tool              # no taskbar entry; desktop-widget behaviour
         )
-        # WA_TranslucentBackground makes the window chrome transparent.
-        # Do NOT add WA_NoSystemBackground — it conflicts and kills translucency.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # WA_TranslucentBackground is intentionally NOT used here.
+        # It causes Qt to use UpdateLayeredWindow (per-pixel alpha), which makes
+        # Windows 11 24H2 skip this window entirely for OLE drag-and-drop routing.
+        # Rounded corners are achieved via setMask() in _apply_mask() instead.
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.setAutoFillBackground(False)
         self.setFixedWidth(WINDOW_WIDTH)
@@ -121,14 +141,20 @@ class ShopWindow(QWidget):
         self.move(x, y)
 
     def _send_to_bottom(self):
-        """Push the window behind all application windows (desktop level)."""
+        """Keep window in normal z-order (not topmost, not behind desktop icons).
+
+        WS_EX_NOACTIVATE is intentionally NOT set here — it signals to the shell
+        that the window cannot receive user input, which causes Windows 11 to skip
+        it entirely for OLE drag-and-drop routing.  Focus-steal prevention is
+        handled instead via WM_MOUSEACTIVATE in nativeEvent.
+        """
         try:
             import win32gui
             import win32con
             hwnd = int(self.winId())
             win32gui.SetWindowPos(
                 hwnd,
-                win32con.HWND_BOTTOM,
+                win32con.HWND_NOTOPMOST,
                 0, 0, 0, 0,
                 win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE
             )
@@ -535,7 +561,6 @@ class ShopWindow(QWidget):
         target_path, label = result
         sc_type = _infer_type(target_path)
 
-        from src.core.shortcut_manager import create_lnk
         lnk_path = create_lnk(target_path, label, self._active_desktop["id"])
 
         shortcut = {
@@ -663,19 +688,132 @@ class ShopWindow(QWidget):
         QMessageBox.warning(self, "Shortcut Status", "\n\n".join(lines))
 
     # ------------------------------------------------------------------
+    # Drag-and-drop — OLE IDropTarget (via Qt setAcceptDrops)
+    # WM_DROPFILES confirmed dead on Win 11 24H2 for WS_EX_LAYERED windows.
+    # ------------------------------------------------------------------
+
+    def nativeEvent(self, event_type, message):
+        """Handle WM_MOUSEACTIVATE to prevent focus stealing without WS_EX_NOACTIVATE.
+
+        WS_EX_NOACTIVATE was removed because it causes Windows 11 to skip this
+        window for OLE drag-and-drop routing.  Returning MA_NOACTIVATE here
+        achieves the same click-no-focus behaviour without the shell-level flag.
+        """
+        if event_type == b"windows_generic_MSG":
+            try:
+                msg = _MSG.from_address(int(message))
+                if msg.message == _WM_MOUSEACTIVATE:
+                    return True, _MA_NOACTIVATE
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasUrls():
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path:
+                self._handle_drop(path)
+
+    def _handle_drop(self, path: str):
+        """Process a single dropped path — .lnk or any file/folder."""
+        original_desktop_path: str | None = None
+
+        if path.lower().endswith(".lnk"):
+            resolved = extract_lnk_target(path)
+            # If the .lnk lives on the shared desktop, remember it for removal prompt
+            try:
+                if os.path.normcase(os.path.dirname(path)) == os.path.normcase(DESKTOP_DIR):
+                    original_desktop_path = path
+            except Exception:
+                pass
+            target_path = resolved if resolved else path
+        else:
+            target_path = path
+
+        # Auto-create profile entry if no active desktop
+        if self._active_desktop is None:
+            name = self._current_vd_name or "New Desktop"
+            vd_id_str = str(self._last_vd_id) if self._last_vd_id else None
+            self._active_desktop = self.config.add_desktop(name, windows_vd_id=vd_id_str)
+            logger.info(f"_handle_drop: auto-created desktop '{name}'")
+
+        # Duplicate check
+        existing_paths = [
+            sc.get("path", "") for sc in self._active_desktop.get("shortcuts", [])
+        ]
+        if target_path in existing_paths:
+            QMessageBox.information(
+                self, "Already Added",
+                f"'{os.path.basename(target_path)}' is already in this desktop."
+            )
+            return
+
+        auto_name = get_display_name(target_path)
+        dialog = NameConfirmDialog(auto_name, target_path, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        label = dialog.get_name()
+
+        lnk_path = create_lnk(target_path, label, self._active_desktop["id"])
+        sc_type = _infer_type(target_path)
+        shortcut = {
+            "label": label,
+            "type":  sc_type,
+            "path":  target_path,
+            "lnk_path": lnk_path,
+            "status": validate_path(target_path),
+        }
+        self.config.add_shortcut(self._active_desktop["id"], shortcut)
+        self._active_desktop = self.config.get_desktop_by_id(self._active_desktop["id"])
+        self._render_body()
+        self._refresh_manage_list()
+
+        logger.info(f"_handle_drop: added '{label}' → {target_path}")
+
+        # Offer to remove the original .lnk from the shared desktop
+        if original_desktop_path:
+            reply = QMessageBox.question(
+                self, "Remove Original",
+                f"Remove the original shortcut from the Desktop?\n{os.path.basename(original_desktop_path)}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    os.remove(original_desktop_path)
+                except Exception as e:
+                    QMessageBox.warning(
+                        self, "Remove Failed",
+                        f"Could not delete original shortcut:\n{e}"
+                    )
+
+    # ------------------------------------------------------------------
     # Z-order — stay at desktop level
     # ------------------------------------------------------------------
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Use a tiny delay so the window is fully composited before we send it down
+        # OLE IDropTarget — registered after HWND exists.
+        # WM_DROPFILES was tested and confirmed dead on Windows 11 24H2 for
+        # WS_EX_LAYERED + WS_EX_NOACTIVATE windows (0x0233 never arrives).
+        # OLE IDropTarget is the only viable mechanism.
+        self.setAcceptDrops(True)
+        self._apply_mask()
+        logger.debug("OLE IDropTarget registered via setAcceptDrops")
         QTimer.singleShot(50, self._send_to_bottom)
-
-    def changeEvent(self, event):
-        from PySide6.QtCore import QEvent
-        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
-            self._send_to_bottom()
-        super().changeEvent(event)
 
     # ------------------------------------------------------------------
     # Drag to move (by header)
@@ -704,13 +842,21 @@ class ShopWindow(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         rect = self.rect().adjusted(1, 1, -1, -1)
-
-        # Semi-transparent dark background — wallpaper shows through
-        painter.setBrush(QBrush(QColor(18, 18, 18, 160)))
+        painter.setBrush(QBrush(QColor(18, 18, 18)))   # solid — no per-pixel alpha
         painter.setPen(QPen(QColor(BRONZE), 1.5))
         painter.drawRoundedRect(rect, CORNER_RADIUS, CORNER_RADIUS)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_mask()
+
+    def _apply_mask(self):
+        """Clip the window to a rounded rectangle so corners look clean."""
+        from PySide6.QtGui import QRegion, QPainterPath
+        path = QPainterPath()
+        path.addRoundedRect(self.rect(), CORNER_RADIUS, CORNER_RADIUS)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     # ------------------------------------------------------------------
     # Style helpers
