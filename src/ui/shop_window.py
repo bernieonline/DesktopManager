@@ -814,6 +814,17 @@ class ShopWindow(QWidget):
         self._apply_mask()
         logger.debug("OLE IDropTarget registered via setAcceptDrops")
         QTimer.singleShot(50, self._send_to_bottom)
+        # At Windows boot time, Explorer's OLE drop routing is not yet fully
+        # operational when we first show.  Re-registering the drop target after
+        # a delay ensures drops work regardless of when in the boot sequence
+        # the shop window appears.  This is a no-op if already working correctly.
+        QTimer.singleShot(5000, self._reregister_drop_target)
+
+    def _reregister_drop_target(self):
+        """Re-register OLE IDropTarget after startup delay (boot-time OLE timing fix)."""
+        self.setAcceptDrops(False)
+        self.setAcceptDrops(True)
+        logger.debug("OLE IDropTarget re-registered after startup delay")
 
     # ------------------------------------------------------------------
     # Drag to move (by header)

@@ -73,12 +73,15 @@ class StartupExecutor:
         Launch ShortcutValidator on a background thread.
         Results are written back to the profile via ConfigManager.
         Runs silently — does not block startup.
+
+        In --startup mode (no QApplication), validation is intentionally skipped.
+        The shop window process runs start_validation() asynchronously after it shows,
+        so duplicating it here only adds blocking delay to the startup sequence.
         """
         try:
             from PySide6.QtWidgets import QApplication
-            # Only start if a QApplication exists (i.e. we're not in pure --startup mode)
             if QApplication.instance() is None:
-                self._validate_blocking(profile)
+                logger.info("Startup mode: validation deferred to shop window process.")
                 return
 
             from src.core.shortcut_validator import ShortcutValidator
@@ -90,17 +93,6 @@ class StartupExecutor:
 
         except Exception as e:
             logger.error(f"Failed to start shortcut validation: {e}")
-
-    def _validate_blocking(self, profile: dict) -> None:
-        """Synchronous fallback validation for --startup mode (no QApplication)."""
-        from src.core.shortcut_manager import validate_path
-        for desktop in profile.get("desktops", []):
-            if not desktop.get("enabled", True):
-                continue
-            for sc in desktop.get("shortcuts", []):
-                status = validate_path(sc.get("path", ""))
-                self.config.update_shortcut_status(desktop["id"], sc["id"], status)
-        logger.info("Blocking validation complete.")
 
     def _on_shortcut_validated(self, desktop_id: str, shortcut_id: str, status: str) -> None:
         self.config.update_shortcut_status(desktop_id, shortcut_id, status)
