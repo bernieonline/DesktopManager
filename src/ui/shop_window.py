@@ -41,8 +41,14 @@ from src.utils.logger import get_logger
 
 logger = get_logger("ShopWindow")
 
-_WM_MOUSEACTIVATE = 0x0021
-_MA_NOACTIVATE    = 3       # return value: don't activate on click
+_WM_MOUSEACTIVATE          = 0x0021
+_MA_NOACTIVATE             = 3           # return value: don't activate on click
+
+# OLE drag-and-drop registration diagnostics
+_S_OK                      = 0x00000000
+_DRAGDROP_E_NOTREGISTERED  = 0x80040100  # RevokeDragDrop: nothing was registered
+_DRAGDROP_E_ALREADYREG     = 0x80040101  # RegisterDragDrop: already registered
+
 
 class _MSG(ctypes.Structure):
     _fields_ = [
@@ -87,6 +93,43 @@ def _calc_dimensions():
     TILE_MARGIN  = max(12, TILE_W // 8)
 
 
+class _ThinProgressBar(QWidget):
+    """3 px progress bar overlaid on the bottom edge of the shop window.
+
+    Shown during background shortcut validation so the user knows status
+    dots are still being updated.  Transparent to mouse events so it
+    never interferes with drag-and-drop or tile clicks.
+    """
+
+    _HEIGHT = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0
+        self._maximum = 1
+        self.setFixedHeight(self._HEIGHT)
+        # Must not swallow mouse/drag events
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def set_progress(self, value: int, maximum: int):
+        self._value = value
+        self._maximum = max(1, maximum)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        ratio = min(1.0, self._value / self._maximum)
+        filled = int(self.width() * ratio)
+        if filled > 0:
+            painter.fillRect(0, 0, filled, self._HEIGHT, QColor(BRONZE))
+        if filled < self.width():
+            painter.fillRect(
+                filled, 0, self.width() - filled, self._HEIGHT,
+                QColor(40, 40, 40, 100),
+            )
+
+
 class ShopWindow(QWidget):
 
     def __init__(self):
@@ -104,9 +147,14 @@ class ShopWindow(QWidget):
         self._current_vd_name: str | None = None     # raw Windows desktop name
         self._last_vd_id = None                      # tracks desktop switches
         self._validator: ShortcutValidator | None = None
+        self._validation_total = 0
+        self._validation_done = 0
+        self._drop_registered = False    # True once RegisterDragDrop is verified
 
         self._setup_window()
         self._build_ui()
+        self._progress_bar = _ThinProgressBar(self)  # overlay, not in layout
+        self._progress_bar.raise_()
         self._detect_and_load_desktop()
         self._position_top_right()
         self._start_desktop_poll()
@@ -128,6 +176,10 @@ class ShopWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.setAutoFillBackground(False)
         self.setFixedWidth(WINDOW_WIDTH)
+        # WM_TASKBARCREATED is broadcast by Explorer to all top-level windows when
+        # it finishes initialising (including at boot and after Explorer restarts).
+        # We use it to re-register our OLE IDropTarget after the shell is ready.
+        self._WM_TASKBARCREATED = ctypes.windll.user32.RegisterWindowMessageW("TaskbarCreated")
         logger.debug(
             f"Screen-relative sizing: window={WINDOW_WIDTH}px "
             f"tile={TILE_W}×{TILE_H}px spacing={TILE_SPACING}px"
@@ -511,6 +563,13 @@ class ShopWindow(QWidget):
         profile = self.config._profile
         if not profile:
             return
+        self._validation_total = sum(
+            len(d.get("shortcuts", [])) for d in profile.get("desktops", [])
+        )
+        self._validation_done = 0
+        if self._validation_total > 0:
+            self._progress_bar.set_progress(0, self._validation_total)
+            self._progress_bar.show()
         self._validator = ShortcutValidator(profile)
         self._validator.shortcut_validated.connect(self._on_shortcut_validated)
         self._validator.validation_complete.connect(self._on_validation_complete)
@@ -523,8 +582,14 @@ class ShopWindow(QWidget):
         # Refresh manage list status icons if open
         if self._manage_visible:
             self._refresh_manage_list()
+        self._validation_done += 1
+        self._progress_bar.set_progress(self._validation_done, self._validation_total)
 
     def _on_validation_complete(self, counts: dict):
+        # Keep the bar visible for at least 800 ms so the user can see it
+        # (local paths validate in <1 s and the bar would otherwise flash away
+        # before the first repaint).
+        QTimer.singleShot(800, self._progress_bar.hide)
         problems = counts.get("unavailable", 0) + counts.get("dead", 0)
         if problems:
             self._btn_status.setToolTip(
@@ -693,17 +758,29 @@ class ShopWindow(QWidget):
     # ------------------------------------------------------------------
 
     def nativeEvent(self, event_type, message):
-        """Handle WM_MOUSEACTIVATE to prevent focus stealing without WS_EX_NOACTIVATE.
+        """Handle WM_MOUSEACTIVATE and WM_TASKBARCREATED.
 
+        WM_MOUSEACTIVATE: prevent focus stealing without WS_EX_NOACTIVATE.
         WS_EX_NOACTIVATE was removed because it causes Windows 11 to skip this
         window for OLE drag-and-drop routing.  Returning MA_NOACTIVATE here
         achieves the same click-no-focus behaviour without the shell-level flag.
+
+        WM_TASKBARCREATED: Explorer broadcasts this when it (re)creates the
+        taskbar — both at first boot and after Explorer crashes and restarts.
+        This is a backup path for the mid-session Explorer-restart case.
+        The primary boot-time fix is _poll_shell_and_register() which handles
+        the common case where our window is created AFTER WM_TASKBARCREATED
+        was already broadcast (so the message is never received here).
         """
         if event_type == b"windows_generic_MSG":
             try:
                 msg = _MSG.from_address(int(message))
                 if msg.message == _WM_MOUSEACTIVATE:
                     return True, _MA_NOACTIVATE
+                if msg.message == self._WM_TASKBARCREATED:
+                    logger.debug("WM_TASKBARCREATED received — re-registering OLE drop target")
+                    self._drop_registered = False   # force fresh registration
+                    QTimer.singleShot(1000, self._do_register_drop)
             except Exception:
                 pass
         return super().nativeEvent(event_type, message)
@@ -806,25 +883,76 @@ class ShopWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # OLE IDropTarget — registered after HWND exists.
-        # WM_DROPFILES was tested and confirmed dead on Windows 11 24H2 for
-        # WS_EX_LAYERED + WS_EX_NOACTIVATE windows (0x0233 never arrives).
-        # OLE IDropTarget is the only viable mechanism.
-        self.setAcceptDrops(True)
         self._apply_mask()
-        logger.debug("OLE IDropTarget registered via setAcceptDrops")
         QTimer.singleShot(50, self._send_to_bottom)
-        # At Windows boot time, Explorer's OLE drop routing is not yet fully
-        # operational when we first show.  Re-registering the drop target after
-        # a delay ensures drops work regardless of when in the boot sequence
-        # the shop window appears.  This is a no-op if already working correctly.
-        QTimer.singleShot(5000, self._reregister_drop_target)
+        self._reposition_progress_bar()
+        # Start OLE drop-target registration.  _poll_shell_and_register() waits
+        # until Shell_TrayWnd exists (proof the taskbar is running), then calls
+        # setAcceptDrops(True).  Periodic re-registration for 5 minutes catches
+        # any invalidation caused by Explorer rebuilding its OLE dispatch table.
+        if not self._drop_registered:
+            QTimer.singleShot(0, self._poll_shell_and_register)
 
-    def _reregister_drop_target(self):
-        """Re-register OLE IDropTarget after startup delay (boot-time OLE timing fix)."""
+    def _poll_shell_and_register(self):
+        """Poll for Explorer's taskbar window, then kick off OLE registration.
+
+        Shell_TrayWnd is Explorer's taskbar window — its existence means the
+        shell is running.  The shop window is now launched by Task Scheduler
+        with a 30-second delay after logon, so Explorer's OLE infrastructure
+        is already stable by the time we get here.  A brief 500 ms buffer is
+        kept just for safety, but the old 3-second wait is no longer needed.
+        """
+        if self._drop_registered:
+            return
+        if ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None):
+            logger.debug("Shell_TrayWnd found — registering OLE drop target in 500 ms")
+            QTimer.singleShot(500, self._do_register_drop)
+        else:
+            logger.debug("Waiting for Shell_TrayWnd…")
+            QTimer.singleShot(500, self._poll_shell_and_register)
+
+    def _do_register_drop(self):
+        """Register OLE IDropTarget via Qt's setAcceptDrops.
+
+        Previous implementations used RevokeDragDrop as a "probe" to verify
+        registration.  This was DESTRUCTIVE — it removed the working registration,
+        and the subsequent re-registration via setAcceptDrops(True) did not always
+        call RegisterDragDrop again internally (PySide6 caching).  Result: the log
+        said "registered" but drops silently stopped working.
+
+        New approach: just register, trust it, and periodically re-register for
+        5 minutes as a safety net (handles boot-time OLE instability and Explorer
+        restarts).  The 30-second startup delay already ensures OLE is stable for
+        the normal boot path.
+        """
+        hwnd = int(self.winId())
         self.setAcceptDrops(False)
         self.setAcceptDrops(True)
-        logger.debug("OLE IDropTarget re-registered after startup delay")
+        logger.debug(f"OLE IDropTarget registered (HWND={hwnd:#010x})")
+        self._drop_registered = True
+
+        # Periodic re-registration: every 30 s for 5 minutes.
+        # Catches boot-time OLE instability and Explorer restarts that
+        # invalidate our IDropTarget registration.
+        self._reregister_count = 0
+        if not hasattr(self, '_reregister_timer') or self._reregister_timer is None:
+            self._reregister_timer = QTimer(self)
+            self._reregister_timer.timeout.connect(self._periodic_reregister)
+        self._reregister_timer.start(30000)
+
+    def _periodic_reregister(self):
+        """Re-register OLE IDropTarget periodically as a safety net."""
+        self._reregister_count += 1
+        if self._reregister_count > 10:  # 5 minutes (10 × 30 s)
+            self._reregister_timer.stop()
+            logger.debug("OLE periodic re-registration complete (5 min)")
+            return
+        hwnd = int(self.winId())
+        self.setAcceptDrops(False)
+        self.setAcceptDrops(True)
+        logger.debug(
+            f"OLE periodic re-registration #{self._reregister_count} (HWND={hwnd:#010x})"
+        )
 
     # ------------------------------------------------------------------
     # Drag to move (by header)
@@ -861,6 +989,13 @@ class ShopWindow(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._apply_mask()
+        self._reposition_progress_bar()
+
+    def _reposition_progress_bar(self):
+        """Keep the progress bar pinned to the bottom edge regardless of window height."""
+        if hasattr(self, "_progress_bar"):
+            h = _ThinProgressBar._HEIGHT
+            self._progress_bar.setGeometry(0, self.height() - h, self.width(), h)
 
     def _apply_mask(self):
         """Clip the window to a rounded rectangle so corners look clean."""

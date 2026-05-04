@@ -1,7 +1,6 @@
+import os
 import sys
 import time
-import subprocess
-from pathlib import Path
 from src.core.config_manager import ConfigManager
 from src.core.virtual_desktop_manager import VirtualDesktopManager
 from src.core.shortcut_manager import place_control_panel_shortcut
@@ -50,35 +49,42 @@ class StartupExecutor:
         logger.info(
             f"Startup complete. {len(created)} desktop(s) created in {elapsed:.2f}s."
         )
-
-        # Launch the shop window as a detached background process
+        # Launch the shop window as a detached process with a 30-second delay.
+        # The delay ensures Explorer's OLE drag-and-drop infrastructure is fully
+        # stable before the shop window registers its IDropTarget.
+        # Launching from here (rather than a Registry Run key) is more reliable
+        # because this Task Scheduler task is guaranteed to run on every logon.
+        # If you previously added a Registry Run key for "--delay 30", remove it
+        # to avoid two shop window instances opening on each logon.
         self._launch_shop_window()
 
     def _launch_shop_window(self) -> None:
-        """Spawn the shop window as a detached process so it persists after startup exits.
+        """Launch the shop window as a detached process with a 30-second delay.
 
-        Supports both development (pythonw + main.py) and PyInstaller bundle
-        (DesktopWorkspaces.exe lives alongside DesktopWorkspacesStartup.exe).
+        Uses pythonw.exe (no console window).  The 30-second delay is applied
+        via the --delay flag in main.py, which sleeps before any Qt/COM
+        initialisation — by then Explorer's OLE routing is always stable.
         """
         try:
-            if getattr(sys, "frozen", False):
-                # PyInstaller bundle — shop window exe is in the same folder
-                shop_exe = Path(sys.executable).parent / "DesktopWorkspaces.exe"
-                cmd = [str(shop_exe)]
-            else:
-                # Running from source
-                pythonw = Path(sys.executable).parent / "pythonw.exe"
-                main_py = Path(__file__).resolve().parents[2] / "main.py"
-                cmd = [str(pythonw), str(main_py)]
-
-            subprocess.Popen(
-                cmd,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
+            import subprocess
+            pythonw = sys.executable
+            # Prefer pythonw.exe (no console window) when running from python.exe
+            if pythonw.lower().endswith("python.exe"):
+                candidate = pythonw[:-10] + "pythonw.exe"
+                if os.path.isfile(candidate):
+                    pythonw = candidate
+            project_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             )
-            logger.info("Shop window launched.")
+            main_py = os.path.join(project_root, "main.py")
+            subprocess.Popen(
+                [pythonw, main_py, "--delay", "30"],
+                cwd=project_root,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+            )
+            logger.info("Shop window launch scheduled (30 s delay).")
         except Exception as e:
-            logger.error(f"Failed to launch shop window: {e}")
+            logger.error(f"Failed to schedule shop window launch: {e}")
 
     def _start_validation(self, profile: dict) -> None:
         """
