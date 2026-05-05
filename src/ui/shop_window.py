@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
     QGridLayout, QScrollArea, QSizePolicy, QFileDialog, QMessageBox,
     QFrame
 )
-from PySide6.QtCore import Qt, QPoint, QTimer
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
+from PySide6.QtCore import Qt, QPoint, QTimer, QEvent
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QCursor
 
 from src.core.config_manager import ConfigManager
 from src.core.virtual_desktop_manager import VirtualDesktopManager
@@ -31,7 +31,7 @@ from src.core.shortcut_manager import (
     validate_path, extract_lnk_target, get_display_name, create_lnk, DESKTOP_DIR
 )
 from src.core.shortcut_validator import ShortcutValidator
-from src.ui.shortcut_tile import ShortcutTile
+from src.ui.shortcut_tile import ShortcutTile, REORDER_MIME
 from src.ui.add_shortcut_dialog import NameConfirmDialog
 from src.ui.styles import (
     BRONZE, TEXT_PRIMARY, TEXT_MUTED, BG_DARK, BORDER,
@@ -43,6 +43,8 @@ logger = get_logger("ShopWindow")
 
 _WM_MOUSEACTIVATE          = 0x0021
 _MA_NOACTIVATE             = 3           # return value: don't activate on click
+_WM_NCHITTEST              = 0x0084
+_HTBOTTOM                  = 15          # resize from bottom edge
 
 # OLE drag-and-drop registration diagnostics
 _S_OK                      = 0x00000000
@@ -72,6 +74,12 @@ TILE_MARGIN  = 16
 TILE_W       = 116
 TILE_H       = 104
 
+# Resize constants
+RESIZE_HANDLE_H = 6   # bottom strip that returns HTBOTTOM
+HEADER_H        = 44
+FOOTER_H        = 44
+TOP_OFFSET      = 72  # same as _position_top_right y offset
+
 
 def _calc_dimensions():
     """
@@ -91,6 +99,22 @@ def _calc_dimensions():
     TILE_H = int(TILE_W * 0.90)          # keep a pleasing aspect ratio
     TILE_SPACING = max(6, TILE_W // 12)
     TILE_MARGIN  = max(12, TILE_W // 8)
+
+
+class _DropIndicator(QWidget):
+    """Thin horizontal bronze line shown between tile rows during reorder drag."""
+
+    _HEIGHT = 3
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self._HEIGHT)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(BRONZE))
 
 
 class _ThinProgressBar(QWidget):
@@ -150,6 +174,14 @@ class ShopWindow(QWidget):
         self._validation_total = 0
         self._validation_done = 0
         self._drop_registered = False    # True once RegisterDragDrop is verified
+        self._in_adjust_size = False     # guard: prevent resizeEvent capturing height during adjustSize
+        self._grid_widget: QWidget | None = None  # ref to tile grid container
+        self._drop_insert_index: int | None = None  # insertion index during reorder drag
+        self._reorder_drag_active = False            # True while internal tile drag is in progress
+
+        # Load persisted window height (None = auto-size to content)
+        ws = self.config._profile.get("window_state", {})
+        self._user_height: int | None = ws.get("shop_height")
 
         self._setup_window()
         self._build_ui()
@@ -191,6 +223,41 @@ class ShopWindow(QWidget):
         x = screen.right() - self.width() - 24
         y = screen.top() + 72   # clear Windows title bars and system tray area
         self.move(x, y)
+
+    # ------------------------------------------------------------------
+    # Height management (vertical resize support)
+    # ------------------------------------------------------------------
+
+    def _update_window_height(self):
+        """Set window height respecting user-dragged height if set."""
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().availableGeometry()
+        max_h = screen.height() - TOP_OFFSET - 12
+        min_h = self._compute_min_height()
+
+        self.setMinimumHeight(min_h)
+        self.setMaximumHeight(max_h)
+
+        if self._user_height is not None:
+            target = max(min_h, min(max_h, self._user_height))
+            self.resize(WINDOW_WIDTH, target)
+        else:
+            self._in_adjust_size = True
+            self.adjustSize()
+            self._in_adjust_size = False
+
+    def _compute_min_height(self) -> int:
+        """Minimum window height: header + 1 tile row + body margins + footer."""
+        body_margin_v = (TILE_MARGIN - 4) * 2
+        min_body = TILE_H + body_margin_v
+        manage_h = self._manage_panel.sizeHint().height() if self._manage_visible else 0
+        return HEADER_H + min_body + FOOTER_H + manage_h + 2  # +2 for root margins
+
+    def _persist_height(self):
+        """Save the user-chosen window height to profile."""
+        if self._user_height is not None:
+            self.config._profile.setdefault("window_state", {})["shop_height"] = self._user_height
+            self.config.save_profile()
 
     def _send_to_bottom(self):
         """Keep window in normal z-order (not topmost, not behind desktop icons).
@@ -281,13 +348,38 @@ class ShopWindow(QWidget):
 
         return header
 
-    def _build_body(self) -> QWidget:
+    def _build_body(self) -> QScrollArea:
         self._body = QWidget()
         self._body.setStyleSheet("background: transparent;")
         self._body_layout = QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(TILE_MARGIN, TILE_MARGIN - 4, TILE_MARGIN, TILE_MARGIN - 4)
         self._body_layout.setSpacing(0)
-        return self._body
+
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidget(self._body)
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # Enable acceptDrops on intermediate widgets so reorder drags reach ShopWindow
+        self._scroll_area.setAcceptDrops(True)
+        self._body.setAcceptDrops(True)
+        self._scroll_area.viewport().setAcceptDrops(True)
+        # Install event filter to forward drag/drop events to ShopWindow
+        self._scroll_area.installEventFilter(self)
+        self._scroll_area.viewport().installEventFilter(self)
+        self._body.installEventFilter(self)
+
+        self._scroll_area.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+            "QScrollBar:vertical { background: rgba(30,30,30,0); width: 6px; }"
+            f"QScrollBar::handle:vertical {{ background: rgba(80,80,80,160); border-radius: 3px; min-height: 20px; }}"
+            f"QScrollBar::handle:vertical:hover {{ background: rgba(184,149,106,200); }}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        return self._scroll_area
 
     def _build_footer(self) -> QWidget:
         footer = QWidget()
@@ -413,12 +505,13 @@ class ShopWindow(QWidget):
 
     def _render_body(self):
         """Clear body and render correct state based on active desktop."""
-        # Clear existing body contents
+        # Clear existing body contents (widgets, spacers, and stretch items)
         while self._body_layout.count():
             item = self._body_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._tiles.clear()
+        self._grid_widget = None
 
         if self._active_desktop is None:
             self._render_unrecognised()
@@ -430,14 +523,20 @@ class ShopWindow(QWidget):
             else:
                 self._render_empty_desktop()
 
-        self.adjustSize()
+        self._update_window_height()
 
     def _render_tile_grid(self, shortcuts: list):
-        grid = QWidget()
-        grid.setStyleSheet("background: transparent;")
-        grid_layout = QGridLayout(grid)
-        grid_layout.setSpacing(TILE_SPACING)
+        self._grid_widget = QWidget()
+        self._grid_widget.setStyleSheet("background: transparent;")
+        self._grid_widget.setAcceptDrops(True)
+        self._grid_widget.installEventFilter(self)
+        self._grid_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        grid_layout = QGridLayout(self._grid_widget)
+        grid_layout.setHorizontalSpacing(TILE_SPACING)
+        grid_layout.setVerticalSpacing(TILE_SPACING)
         grid_layout.setContentsMargins(0, 0, 0, 0)
+
+        num_rows = (len(shortcuts) + TILES_PER_ROW - 1) // TILES_PER_ROW
 
         for i, sc in enumerate(shortcuts):
             tile = ShortcutTile(sc, tile_w=TILE_W, tile_h=TILE_H)
@@ -452,10 +551,20 @@ class ShopWindow(QWidget):
                 spacer = QWidget()
                 spacer.setFixedSize(TILE_W, TILE_H)
                 spacer.setStyleSheet("background: transparent;")
-                last_row = (len(shortcuts) - 1) // TILES_PER_ROW
+                last_row = num_rows - 1
                 grid_layout.addWidget(spacer, last_row, col)
 
-        self._body_layout.addWidget(grid)
+        # Fix each row height so no row stretches beyond its tile height
+        for r in range(num_rows):
+            grid_layout.setRowMinimumHeight(r, TILE_H)
+            grid_layout.setRowStretch(r, 0)
+
+        self._body_layout.addWidget(self._grid_widget)
+        self._body_layout.addStretch(1)
+
+        # Drop indicator overlay (child of body so it scrolls with content)
+        self._drop_indicator = _DropIndicator(parent=self._body)
+        self._drop_indicator.setFixedWidth(WINDOW_WIDTH - TILE_MARGIN * 2)
 
     def _render_unrecognised(self):
         name = self._current_vd_name or "This Desktop"
@@ -671,7 +780,7 @@ class ShopWindow(QWidget):
         self._btn_manage.setChecked(self._manage_visible)
         if self._manage_visible:
             self._refresh_manage_list()
-        self.adjustSize()
+        self._update_window_height()
 
     def _on_open_control_panel(self):
         """Open the full management Control Panel window."""
@@ -757,25 +866,36 @@ class ShopWindow(QWidget):
     # WM_DROPFILES confirmed dead on Win 11 24H2 for WS_EX_LAYERED windows.
     # ------------------------------------------------------------------
 
+    def eventFilter(self, obj, event):
+        """Forward drag/drop events from child widgets to ShopWindow."""
+        t = event.type()
+        if t == QEvent.Type.DragEnter:
+            self.dragEnterEvent(event)
+            return True
+        if t == QEvent.Type.DragMove:
+            self.dragMoveEvent(event)
+            return True
+        if t == QEvent.Type.DragLeave:
+            self.dragLeaveEvent(event)
+            return True
+        if t == QEvent.Type.Drop:
+            self.dropEvent(event)
+            return True
+        return super().eventFilter(obj, event)
+
     def nativeEvent(self, event_type, message):
-        """Handle WM_MOUSEACTIVATE and WM_TASKBARCREATED.
-
-        WM_MOUSEACTIVATE: prevent focus stealing without WS_EX_NOACTIVATE.
-        WS_EX_NOACTIVATE was removed because it causes Windows 11 to skip this
-        window for OLE drag-and-drop routing.  Returning MA_NOACTIVATE here
-        achieves the same click-no-focus behaviour without the shell-level flag.
-
-        WM_TASKBARCREATED: Explorer broadcasts this when it (re)creates the
-        taskbar — both at first boot and after Explorer crashes and restarts.
-        This is a backup path for the mid-session Explorer-restart case.
-        The primary boot-time fix is _poll_shell_and_register() which handles
-        the common case where our window is created AFTER WM_TASKBARCREATED
-        was already broadcast (so the message is never received here).
-        """
+        """Handle WM_NCHITTEST, WM_MOUSEACTIVATE, and WM_TASKBARCREATED."""
         if event_type == b"windows_generic_MSG":
             try:
                 msg = _MSG.from_address(int(message))
-                if msg.message == _WM_MOUSEACTIVATE:
+                # Bottom-edge resize handle
+                if msg.message == _WM_NCHITTEST:
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    rel_y = y - self.frameGeometry().top()
+                    if rel_y >= self.height() - RESIZE_HANDLE_H:
+                        return True, _HTBOTTOM
+                if msg.message == _WM_MOUSEACTIVATE and not self._reorder_drag_active:
                     return True, _MA_NOACTIVATE
                 if msg.message == self._WM_TASKBARCREATED:
                     logger.debug("WM_TASKBARCREATED received — re-registering OLE drop target")
@@ -786,16 +906,35 @@ class ShopWindow(QWidget):
         return super().nativeEvent(event_type, message)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasFormat(REORDER_MIME):
+            self._reorder_drag_active = True
+            event.acceptProposedAction()
+        elif event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasFormat(REORDER_MIME):
+            event.acceptProposedAction()
+            self._show_drop_indicator()
+        elif event.mimeData().hasUrls():
             event.acceptProposedAction()
 
+    def dragLeaveEvent(self, event):
+        self._reorder_drag_active = False
+        self._hide_drop_indicator()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        self._reorder_drag_active = False
+        if event.mimeData().hasFormat(REORDER_MIME):
+            event.acceptProposedAction()
+            sc_id = event.mimeData().data(REORDER_MIME).data().decode("utf-8")
+            insert_idx = self._drop_insert_index   # save before hide clears it
+            self._hide_drop_indicator()
+            self._on_reorder_drop(sc_id, insert_idx)
+            return
         if not event.mimeData().hasUrls():
             event.ignore()
             return
@@ -804,6 +943,92 @@ class ShopWindow(QWidget):
             path = url.toLocalFile()
             if path:
                 self._handle_drop(path)
+
+    # ------------------------------------------------------------------
+    # Reorder drop handling
+    # ------------------------------------------------------------------
+
+    def _show_drop_indicator(self, pos: QPoint = None):
+        """Position the drop indicator line based on cursor position."""
+        if self._grid_widget is None or not hasattr(self, '_drop_indicator'):
+            return
+        shortcuts = self._active_desktop.get("shortcuts", []) if self._active_desktop else []
+        n = len(shortcuts)
+        if n == 0:
+            self._drop_indicator.hide()
+            return
+
+        # Use global cursor position — reliable regardless of which child widget
+        # the event was forwarded from via eventFilter
+        grid_pos = self._grid_widget.mapFromGlobal(QCursor.pos())
+        gy = grid_pos.y()
+
+        row_height = TILE_H + TILE_SPACING
+        num_rows = (n + TILES_PER_ROW - 1) // TILES_PER_ROW
+        row = max(0, gy // row_height)
+
+        # Snap: top half of row → insert before, bottom half → insert after
+        row_local_y = gy - row * row_height
+        if row_local_y < row_height // 2:
+            insert_before_row = row
+        else:
+            insert_before_row = row + 1
+        insert_before_row = max(0, min(insert_before_row, num_rows))
+
+        # Column-aware insertion within a row
+        gx = grid_pos.x()
+        col_width = TILE_W + TILE_SPACING
+        col = max(0, min(gx // col_width, TILES_PER_ROW - 1))
+
+        if insert_before_row < num_rows:
+            self._drop_insert_index = min(insert_before_row * TILES_PER_ROW + col, n)
+        else:
+            self._drop_insert_index = n
+
+        # Position the indicator line (in _body coordinates)
+        grid_top_in_body = self._grid_widget.pos().y()
+        indicator_y = grid_top_in_body + insert_before_row * row_height - _DropIndicator._HEIGHT // 2
+        # Clamp so it doesn't go above the grid
+        indicator_y = max(grid_top_in_body - _DropIndicator._HEIGHT, indicator_y)
+
+        self._drop_indicator.move(TILE_MARGIN, indicator_y)
+        self._drop_indicator.raise_()
+        self._drop_indicator.show()
+
+    def _hide_drop_indicator(self):
+        if hasattr(self, '_drop_indicator'):
+            self._drop_indicator.hide()
+        self._drop_insert_index = None
+
+    def _on_reorder_drop(self, sc_id: str, insert_idx: int | None = None):
+        """Reorder shortcuts after a drag-and-drop within the grid."""
+        if self._active_desktop is None:
+            return
+        shortcuts = self._active_desktop.get("shortcuts", [])
+        if insert_idx is None:
+            logger.warning("_on_reorder_drop: no insertion index")
+            return
+
+        ordered_ids = [sc["id"] for sc in shortcuts]
+        if sc_id not in ordered_ids:
+            logger.warning(f"_on_reorder_drop: '{sc_id}' not found")
+            return
+
+        src_idx = ordered_ids.index(sc_id)
+        ordered_ids.pop(src_idx)
+
+        # Adjust insertion index when source was before target
+        adj = insert_idx if src_idx >= insert_idx else insert_idx - 1
+        adj = max(0, min(adj, len(ordered_ids)))
+        ordered_ids.insert(adj, sc_id)
+
+        desktop_id = self._active_desktop["id"]
+        if self.config.reorder_shortcuts(desktop_id, ordered_ids):
+            self._active_desktop = self.config.get_desktop_by_id(desktop_id)
+            self._render_body()
+            if self._manage_visible:
+                self._refresh_manage_list()
+            logger.info(f"Shortcuts reordered for desktop '{desktop_id}'")
 
     def _handle_drop(self, path: str):
         """Process a single dropped path — .lnk or any file/folder."""
@@ -990,6 +1215,11 @@ class ShopWindow(QWidget):
         super().resizeEvent(event)
         self._apply_mask()
         self._reposition_progress_bar()
+        # Capture user-dragged height (skip when triggered by adjustSize)
+        if not self._in_adjust_size and event.oldSize().height() > 0:
+            if event.oldSize().height() != event.size().height():
+                self._user_height = event.size().height()
+                self._persist_height()
 
     def _reposition_progress_bar(self):
         """Keep the progress bar pinned to the bottom edge regardless of window height."""

@@ -239,6 +239,30 @@ class ConfigManager:
         logger.info(f"Shortcut removed: '{shortcut_id}' from desktop '{desktop_id}'")
         return True
 
+    def reorder_shortcuts(self, desktop_id: str, ordered_ids: list) -> bool:
+        """Rebuild the shortcuts list for *desktop_id* in the order given by
+        *ordered_ids*.  Any shortcuts not listed are appended at the end."""
+        desktop = self.get_desktop_by_id(desktop_id)
+        if desktop is None:
+            logger.warning(f"reorder_shortcuts: desktop '{desktop_id}' not found.")
+            return False
+
+        current = {sc["id"]: sc for sc in desktop.get("shortcuts", [])}
+        seen: set = set()
+        reordered = []
+        for sc_id in ordered_ids:
+            if sc_id in current and sc_id not in seen:
+                reordered.append(current[sc_id])
+                seen.add(sc_id)
+        # Safety net: append any shortcuts missing from ordered_ids
+        for sc in desktop.get("shortcuts", []):
+            if sc["id"] not in seen:
+                reordered.append(sc)
+        desktop["shortcuts"] = reordered
+        self.save_profile()
+        logger.info(f"Shortcuts reordered for desktop '{desktop_id}'")
+        return True
+
     def update_shortcut_status(self, desktop_id: str, shortcut_id: str, status: str) -> bool:
         shortcut = self.get_shortcut_by_id(desktop_id, shortcut_id)
         if shortcut is None:

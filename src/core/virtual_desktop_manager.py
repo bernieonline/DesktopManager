@@ -117,21 +117,22 @@ class VirtualDesktopManager:
 
     def sync_desktops(self, profile_desktops: list[dict]) -> dict[str, VirtualDesktop]:
         """
-        Sync Windows virtual desktops to match the profile:
-        - Creates missing enabled desktops
-        - Removes desktops that are disabled
-        Returns a mapping of active desktop name -> VirtualDesktop.
+        Match existing Windows virtual desktops to profile entries.
+        Does NOT create or delete desktops — the user manages those via Windows
+        (Win+Ctrl+D to create, right-click taskbar to remove).
+        Returns a mapping of active desktop name -> VirtualDesktop for desktops
+        that exist in both Windows and the profile.
         """
         result = {}
         for desktop_def in profile_desktops:
+            if not desktop_def.get("enabled", True):
+                continue
             name = desktop_def["name"]
-            if desktop_def.get("enabled", True):
-                desktop = self.create_desktop(name)
-                if desktop:
-                    result[name] = desktop
+            existing = self.find_desktop_by_name(name)
+            if existing:
+                result[name] = existing
+                logger.info(f"Matched profile desktop '{name}' to existing virtual desktop.")
             else:
-                if self.find_desktop_by_name(name):
-                    self.delete_desktop(name)
-                    logger.info(f"Removed disabled desktop: '{name}'")
-        logger.info(f"Sync complete: {len(result)} desktop(s) active.")
+                logger.info(f"Profile desktop '{name}' not found in Windows — skipping.")
+        logger.info(f"Sync complete: {len(result)} desktop(s) matched.")
         return result
