@@ -78,11 +78,11 @@ class StartupExecutor:
             )
             main_py = os.path.join(project_root, "main.py")
             subprocess.Popen(
-                [pythonw, main_py, "--delay", "30"],
+                [pythonw, main_py, "--delay", "15"],
                 cwd=project_root,
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
             )
-            logger.info("Shop window launch scheduled (30 s delay).")
+            logger.info("Shop window launch scheduled (15 s delay).")
         except Exception as e:
             logger.error(f"Failed to schedule shop window launch: {e}")
 
