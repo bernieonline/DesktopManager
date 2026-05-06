@@ -43,8 +43,6 @@ logger = get_logger("ShopWindow")
 
 _WM_MOUSEACTIVATE          = 0x0021
 _MA_NOACTIVATE             = 3           # return value: don't activate on click
-_WM_NCHITTEST              = 0x0084
-_HTBOTTOM                  = 15          # resize from bottom edge
 
 # OLE drag-and-drop registration diagnostics
 _S_OK                      = 0x00000000
@@ -178,6 +176,7 @@ class ShopWindow(QWidget):
         self._grid_widget: QWidget | None = None  # ref to tile grid container
         self._drop_insert_index: int | None = None  # insertion index during reorder drag
         self._reorder_drag_active = False            # True while internal tile drag is in progress
+        self._resizing = False                          # True while bottom-edge resize drag is active
 
         # Load persisted window height (None = auto-size to content)
         ws = self.config._profile.get("window_state", {})
@@ -207,6 +206,7 @@ class ShopWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.setAutoFillBackground(False)
+        self.setMouseTracking(True)  # receive mouseMoveEvent without button held
         self.setFixedWidth(WINDOW_WIDTH)
         # WM_TASKBARCREATED is broadcast by Explorer to all top-level windows when
         # it finishes initialising (including at boot and after Explorer restarts).
@@ -884,17 +884,10 @@ class ShopWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def nativeEvent(self, event_type, message):
-        """Handle WM_NCHITTEST, WM_MOUSEACTIVATE, and WM_TASKBARCREATED."""
+        """Handle WM_MOUSEACTIVATE and WM_TASKBARCREATED."""
         if event_type == b"windows_generic_MSG":
             try:
                 msg = _MSG.from_address(int(message))
-                # Bottom-edge resize handle
-                if msg.message == _WM_NCHITTEST:
-                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
-                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-                    rel_y = y - self.frameGeometry().top()
-                    if rel_y >= self.height() - RESIZE_HANDLE_H:
-                        return True, _HTBOTTOM
                 if msg.message == _WM_MOUSEACTIVATE and not self._reorder_drag_active:
                     return True, _MA_NOACTIVATE
                 if msg.message == self._WM_TASKBARCREATED:
@@ -1183,21 +1176,57 @@ class ShopWindow(QWidget):
     # Drag to move (by header)
     # ------------------------------------------------------------------
 
+    def _in_resize_zone(self, local_y: float) -> bool:
+        """True when the cursor is within the bottom resize handle strip."""
+        return local_y >= self.height() - RESIZE_HANDLE_H
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Only drag from header area (top 44px)
-            if event.position().y() <= 44:
+            if self._in_resize_zone(event.position().y()):
+                # Start bottom-edge resize
+                self._resizing = True
+                self._resize_start_y = event.globalPosition().y()
+                self._resize_start_h = self.height()
+            elif event.position().y() <= HEADER_H:
+                # Drag-to-move from header area
                 self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
+        if self._resizing and event.buttons() & Qt.MouseButton.LeftButton:
+            # Bottom-edge resize: adjust height by how far the mouse moved
+            from PySide6.QtWidgets import QApplication
+            delta = event.globalPosition().y() - self._resize_start_y
+            new_h = int(self._resize_start_h + delta)
+            screen = QApplication.primaryScreen().availableGeometry()
+            max_h = screen.height() - TOP_OFFSET - 12
+            min_h = self._compute_min_height()
+            new_h = max(min_h, min(max_h, new_h))
+            self.resize(WINDOW_WIDTH, new_h)
+        elif self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
+        elif not event.buttons():
+            # No button held — update cursor to show resize affordance
+            if self._in_resize_zone(event.position().y()):
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            else:
+                self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._resizing:
+            self._resizing = False
+            self._user_height = self.height()
+            self._persist_height()
+            self.unsetCursor()
         self._drag_pos = None
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        """Reset cursor when mouse leaves the window entirely."""
+        if not self._resizing:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     # ------------------------------------------------------------------
     # Paint — window border and background
