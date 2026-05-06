@@ -55,10 +55,10 @@ Section "Desktop Workspaces" SecMain
 
   ; Register startup — two separate Run key entries (per-user, no admin required).
   ; Entry 1: Startup executor — runs immediately at logon, creates desktops, exits.
-  ; Entry 2: Shop window — runs with --delay 30 so it starts 30 s after logon,
+  ; Entry 2: Shop window — runs with --delay 15 so it starts 15 s after logon,
   ;          by which time Explorer's OLE drag-and-drop infrastructure is stable.
   WriteRegStr HKCU "${RUN_KEY}" "${APP_NAME} Startup" '"$INSTDIR\${STARTUP_EXE}"'
-  WriteRegStr HKCU "${RUN_KEY}" "${APP_NAME}" '"$INSTDIR\${APP_EXE}" --delay 30'
+  WriteRegStr HKCU "${RUN_KEY}" "${APP_NAME}" '"$INSTDIR\${APP_EXE}" --delay 15'
 
   ; Uninstall registry entry (per-user, no admin required)
   WriteRegStr   HKCU "${UNINSTALL_KEY}" "DisplayName"          "${APP_NAME}"
