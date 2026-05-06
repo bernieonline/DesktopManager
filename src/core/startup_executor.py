@@ -59,27 +59,43 @@ class StartupExecutor:
         self._launch_shop_window()
 
     def _launch_shop_window(self) -> None:
-        """Launch the shop window as a detached process with a 30-second delay.
+        """Launch the shop window as a detached process with a 15-second delay.
 
-        Uses pythonw.exe (no console window).  The 30-second delay is applied
-        via the --delay flag in main.py, which sleeps before any Qt/COM
-        initialisation — by then Explorer's OLE routing is always stable.
+        In frozen (PyInstaller) builds, launches the sibling
+        DesktopWorkspaces.exe.  In dev mode, launches via pythonw.exe.
+        The --delay flag in main.py sleeps before any Qt/COM initialisation
+        so Explorer's OLE drag-and-drop routing is stable by the time the
+        shop window registers its IDropTarget.
         """
         try:
             import subprocess
-            pythonw = sys.executable
-            # Prefer pythonw.exe (no console window) when running from python.exe
-            if pythonw.lower().endswith("python.exe"):
-                candidate = pythonw[:-10] + "pythonw.exe"
-                if os.path.isfile(candidate):
-                    pythonw = candidate
-            project_root = os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            )
-            main_py = os.path.join(project_root, "main.py")
+
+            if getattr(sys, "frozen", False):
+                # Frozen build: launch sibling DesktopWorkspaces.exe
+                exe_dir = os.path.dirname(sys.executable)
+                shop_exe = os.path.join(exe_dir, "DesktopWorkspaces.exe")
+                if not os.path.isfile(shop_exe):
+                    logger.error(f"Shop window exe not found: {shop_exe}")
+                    return
+                cmd = [shop_exe, "--delay", "15"]
+                cwd = exe_dir
+            else:
+                # Dev mode: launch via pythonw.exe
+                pythonw = sys.executable
+                if pythonw.lower().endswith("python.exe"):
+                    candidate = pythonw[:-10] + "pythonw.exe"
+                    if os.path.isfile(candidate):
+                        pythonw = candidate
+                project_root = os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                )
+                main_py = os.path.join(project_root, "main.py")
+                cmd = [pythonw, main_py, "--delay", "15"]
+                cwd = project_root
+
             subprocess.Popen(
-                [pythonw, main_py, "--delay", "15"],
-                cwd=project_root,
+                cmd,
+                cwd=cwd,
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
             )
             logger.info("Shop window launch scheduled (15 s delay).")

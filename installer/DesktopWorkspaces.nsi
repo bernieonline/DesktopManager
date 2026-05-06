@@ -53,12 +53,10 @@ Section "Desktop Workspaces" SecMain
   CreateShortcut  "$SMPROGRAMS\${APP_NAME}\Uninstall.lnk" \
                   "$INSTDIR\Uninstall.exe"
 
-  ; Register startup — two separate Run key entries (per-user, no admin required).
-  ; Entry 1: Startup executor — runs immediately at logon, creates desktops, exits.
-  ; Entry 2: Shop window — runs with --delay 15 so it starts 15 s after logon,
-  ;          by which time Explorer's OLE drag-and-drop infrastructure is stable.
-  WriteRegStr HKCU "${RUN_KEY}" "${APP_NAME} Startup" '"$INSTDIR\${STARTUP_EXE}"'
-  WriteRegStr HKCU "${RUN_KEY}" "${APP_NAME}" '"$INSTDIR\${APP_EXE}" --delay 15'
+  ; Register startup — single Run key entry (per-user, no admin required).
+  ; The startup executor creates desktops, then launches the shop window itself
+  ; (with a 15 s delay so Explorer's OLE drag-and-drop is stable).
+  WriteRegStr HKCU "${RUN_KEY}" "${APP_NAME}" '"$INSTDIR\${STARTUP_EXE}"'
 
   ; Uninstall registry entry (per-user, no admin required)
   WriteRegStr   HKCU "${UNINSTALL_KEY}" "DisplayName"          "${APP_NAME}"
@@ -80,9 +78,9 @@ SectionEnd
 
 Section "Uninstall"
 
-  ; Remove startup Run key entries
+  ; Remove startup Run key entry
   DeleteRegValue HKCU "${RUN_KEY}" "${APP_NAME}"
-  DeleteRegValue HKCU "${RUN_KEY}" "${APP_NAME} Startup"
+  DeleteRegValue HKCU "${RUN_KEY}" "${APP_NAME} Startup"  ; clean up legacy entry if present
 
   ; Remove Start Menu
   RMDir /r "$SMPROGRAMS\${APP_NAME}"
