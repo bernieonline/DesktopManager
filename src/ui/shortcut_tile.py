@@ -109,6 +109,19 @@ class ShortcutTile(QWidget):
         layout.addWidget(self._name_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
     def _load_icon(self):
+        # Prefer cached icon PNG (preserves favicons / custom IconLocation)
+        cached = self._data.get("icon_cache")
+        if cached and os.path.isfile(cached):
+            pixmap = QPixmap(cached)
+            if not pixmap.isNull():
+                self._icon_label.setPixmap(
+                    pixmap.scaled(self._icon_size, self._icon_size,
+                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+                )
+                return
+
+        # Fallback: live shell icon
         path = self._data.get("path", "")
         icon = get_shell_icon(path)
         pixmap = icon.pixmap(QSize(self._icon_size, self._icon_size))

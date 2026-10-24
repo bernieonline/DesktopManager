@@ -42,6 +42,7 @@ def _get_desktop_dir() -> str:
 
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "DesktopWorkspaces")
 SHORTCUTS_DIR = os.path.join(APP_DIR, "shortcuts")
+ICONS_DIR = os.path.join(APP_DIR, "icons")
 DESKTOP_DIR = _get_desktop_dir()
 
 # Project root = three levels up from this file (src/core/shortcut_manager.py)
@@ -248,6 +249,312 @@ def _find_pythonw() -> str | None:
         if c.exists():
             return str(c)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Icon caching
+# ---------------------------------------------------------------------------
+
+def cache_icon(source_path: str, shortcut_id: str) -> str | None:
+    """
+    Cache the shell icon of source_path as a PNG in ICONS_DIR.
+
+    For .url files: reads the IconFile field from the INI and loads it directly.
+    For .lnk files: reads the IconLocation property via COM.
+    Falls back to QFileIconProvider for everything else.
+
+    Returns the PNG path, or None on failure.
+    """
+    try:
+        os.makedirs(ICONS_DIR, exist_ok=True)
+        png_path = os.path.join(ICONS_DIR, f"{shortcut_id}.png")
+
+        pixmap = _extract_custom_icon(source_path)
+
+        if pixmap is None or pixmap.isNull():
+            # Fallback: QFileIconProvider (generic file-type icon)
+            provider = QFileIconProvider()
+            icon = provider.icon(QFileInfo(source_path))
+            pixmap = icon.pixmap(256, 256)
+
+        if pixmap is None or pixmap.isNull():
+            logger.warning(f"cache_icon: null pixmap for '{source_path}'")
+            return None
+
+        if pixmap.save(png_path, "PNG"):
+            logger.info(f"Cached icon for '{shortcut_id}' → {png_path}")
+            return png_path
+        else:
+            logger.warning(f"cache_icon: failed to save PNG for '{source_path}'")
+            return None
+    except Exception as e:
+        logger.error(f"cache_icon failed for '{source_path}': {e}")
+        return None
+
+
+def _extract_custom_icon(source_path: str):
+    """
+    Try to extract the real custom icon from a .url or .lnk file.
+    Returns a QPixmap or None.
+    """
+    from PySide6.QtGui import QPixmap, QImage
+
+    lower = source_path.lower()
+
+    # --- .url files: read IconFile from INI ---
+    if lower.endswith(".url"):
+        icon_file = _read_url_icon_file(source_path)
+        if icon_file:
+            pixmap = _load_icon_from_path(icon_file)
+            if pixmap and not pixmap.isNull():
+                return pixmap
+
+    # --- .lnk files: read IconLocation via COM ---
+    elif lower.endswith(".lnk"):
+        icon_location = _read_lnk_icon_location(source_path)
+        if icon_location:
+            icon_file, icon_index = icon_location
+            if icon_file:
+                pixmap = _load_icon_from_resource(icon_file, icon_index)
+                if pixmap and not pixmap.isNull():
+                    return pixmap
+
+    # --- SHGetFileInfo as a middle-ground fallback ---
+    return _shgetfileinfo_icon(source_path)
+
+
+def _read_url_icon_file(url_path: str) -> str | None:
+    """Read the IconFile field from a .url file."""
+    try:
+        import configparser
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(url_path, encoding="utf-8")
+        icon_file = cp.get("InternetShortcut", "IconFile", fallback=None)
+        if icon_file and os.path.isfile(icon_file):
+            logger.debug(f"_read_url_icon_file: '{url_path}' → IconFile='{icon_file}'")
+            return icon_file
+    except Exception as e:
+        logger.debug(f"_read_url_icon_file failed for '{url_path}': {e}")
+    return None
+
+
+def _read_lnk_icon_location(lnk_path: str) -> tuple[str, int] | None:
+    """Read IconLocation from a .lnk file via COM. Returns (icon_file, icon_index) or None."""
+    try:
+        import win32com.client
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortcut(lnk_path)
+        loc = shortcut.IconLocation  # e.g. "C:\path\icon.ico, 0"
+        if loc:
+            parts = loc.rsplit(",", 1)
+            icon_file = parts[0].strip()
+            icon_index = int(parts[1].strip()) if len(parts) > 1 else 0
+            if icon_file and os.path.isfile(icon_file):
+                logger.debug(f"_read_lnk_icon_location: '{lnk_path}' → '{icon_file}', {icon_index}")
+                return icon_file, icon_index
+    except Exception as e:
+        logger.debug(f"_read_lnk_icon_location failed for '{lnk_path}': {e}")
+    return None
+
+
+def _load_icon_from_path(icon_path: str):
+    """Load an icon file (.ico, .png, .bmp) as a QPixmap."""
+    from PySide6.QtGui import QPixmap
+    try:
+        icon = QIcon(icon_path)
+        sizes = icon.availableSizes()
+        if sizes:
+            # Pick the largest available size
+            best = max(sizes, key=lambda s: s.width() * s.height())
+            pixmap = icon.pixmap(best)
+        else:
+            pixmap = icon.pixmap(256, 256)
+        if not pixmap.isNull():
+            return pixmap
+    except Exception as e:
+        logger.debug(f"_load_icon_from_path failed for '{icon_path}': {e}")
+    return None
+
+
+def _load_icon_from_resource(icon_file: str, icon_index: int):
+    """Extract an icon from an .exe/.dll/.ico resource using win32gui."""
+    from PySide6.QtGui import QPixmap
+    try:
+        import win32gui
+        import win32ui
+        import win32con
+
+        # ExtractIconEx returns (large_icons, small_icons) — each a tuple of HICONs
+        large, small = win32gui.ExtractIconEx(icon_file, icon_index, 1)
+        hicon = large[0] if large else (small[0] if small else None)
+        if not hicon:
+            # Try loading as plain icon file
+            return _load_icon_from_path(icon_file)
+
+        try:
+            pixmap = _hicon_to_pixmap(hicon)
+            return pixmap
+        finally:
+            # Clean up all extracted icons
+            for h in large:
+                win32gui.DestroyIcon(h)
+            for h in small:
+                win32gui.DestroyIcon(h)
+
+    except Exception as e:
+        logger.debug(f"_load_icon_from_resource failed for '{icon_file}': {e}")
+        return _load_icon_from_path(icon_file)
+
+
+def _hicon_to_pixmap(hicon):
+    """Convert a Windows HICON to a QPixmap using pywin32."""
+    from PySide6.QtGui import QPixmap, QImage
+    try:
+        import win32gui
+        import win32ui
+        import win32con
+        import win32api
+    except ImportError:
+        logger.debug("_hicon_to_pixmap: pywin32 not available")
+        return None
+
+    try:
+        info = win32gui.GetIconInfo(hicon)
+        # info = (fIcon, xHotspot, yHotspot, hbmMask, hbmColor)
+        hbm_color = info[4]
+        hbm_mask = info[3]
+        src_bmp = hbm_color or hbm_mask
+
+        # Get bitmap dimensions
+        bmp_info = win32gui.GetObject(src_bmp)
+        w = bmp_info.bmWidth
+        h = bmp_info.bmHeight
+
+        # Create a compatible DC and 32-bit DIB section
+        hdc_screen = win32gui.GetDC(0)
+        hdc_mem = win32gui.CreateCompatibleDC(hdc_screen)
+
+        import ctypes
+        import ctypes.wintypes
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", ctypes.wintypes.DWORD),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", ctypes.wintypes.WORD),
+                ("biBitCount", ctypes.wintypes.WORD),
+                ("biCompression", ctypes.wintypes.DWORD),
+                ("biSizeImage", ctypes.wintypes.DWORD),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", ctypes.wintypes.DWORD),
+                ("biClrImportant", ctypes.wintypes.DWORD),
+            ]
+
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth = w
+        bmi.biHeight = -h  # top-down
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = 0  # BI_RGB
+
+        # Create DIB section
+        ppvBits = ctypes.c_void_p()
+        hbm_dib = ctypes.windll.gdi32.CreateDIBSection(
+            hdc_mem, ctypes.byref(bmi), 0, ctypes.byref(ppvBits), None, 0
+        )
+        old_bmp = win32gui.SelectObject(hdc_mem, hbm_dib)
+
+        # Draw the icon into the DIB
+        # Fill with transparent black first
+        buf_size = w * h * 4
+        ctypes.memset(ppvBits, 0, buf_size)
+        win32gui.DrawIconEx(hdc_mem, 0, 0, hicon, w, h, 0, 0,
+                            win32con.DI_NORMAL)
+
+        # Copy pixel data
+        raw = (ctypes.c_char * buf_size).from_address(ppvBits.value)
+        data = bytes(raw)
+
+        # Cleanup GDI
+        win32gui.SelectObject(hdc_mem, old_bmp)
+        ctypes.windll.gdi32.DeleteObject(hbm_dib)
+        win32gui.DeleteDC(hdc_mem)
+        win32gui.ReleaseDC(0, hdc_screen)
+        if hbm_color:
+            win32gui.DeleteObject(hbm_color)
+        if hbm_mask:
+            win32gui.DeleteObject(hbm_mask)
+
+        # BGRA bytes -> QImage -> QPixmap
+        img = QImage(data, w, h, w * 4, QImage.Format.Format_ARGB32)
+        pixmap = QPixmap.fromImage(img.copy())
+        return pixmap if not pixmap.isNull() else None
+
+    except Exception as e:
+        logger.debug(f"_hicon_to_pixmap failed: {e}")
+        return None
+
+
+def _shgetfileinfo_icon(path: str):
+    """Use SHGetFileInfo to get the icon Windows Explorer displays."""
+    from PySide6.QtGui import QPixmap
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        class SHFILEINFOW(ctypes.Structure):
+            _fields_ = [
+                ("hIcon", ctypes.wintypes.HANDLE),
+                ("iIcon", ctypes.c_int),
+                ("dwAttributes", ctypes.wintypes.DWORD),
+                ("szDisplayName", ctypes.c_wchar * 260),
+                ("szTypeName", ctypes.c_wchar * 80),
+            ]
+
+        SHGFI_ICON = 0x000000100
+        SHGFI_LARGEICON = 0x000000000
+
+        sfi = SHFILEINFOW()
+        # SHGetFileInfoW requires backslash paths on Windows
+        norm_path = os.path.normpath(path)
+        result = ctypes.windll.shell32.SHGetFileInfoW(
+            norm_path, 0, ctypes.byref(sfi), ctypes.sizeof(sfi),
+            SHGFI_ICON | SHGFI_LARGEICON
+        )
+        if result and sfi.hIcon:
+            try:
+                return _hicon_to_pixmap(sfi.hIcon)
+            finally:
+                ctypes.windll.user32.DestroyIcon(sfi.hIcon)
+    except Exception as e:
+        logger.debug(f"_shgetfileinfo_icon failed for '{path}': {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# .url file parsing
+# ---------------------------------------------------------------------------
+
+def parse_url_file(url_path: str) -> str | None:
+    """
+    Read a .url (web shortcut) file and return the URL it points to.
+    .url files use INI format: [InternetShortcut]\\nURL=https://...
+    Returns None if the file can't be read or has no URL= line.
+    """
+    try:
+        import configparser
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(url_path, encoding="utf-8")
+        url = cp.get("InternetShortcut", "URL", fallback=None)
+        if url:
+            logger.info(f"Parsed .url file: '{url_path}' → {url}")
+        return url
+    except Exception as e:
+        logger.error(f"Failed to parse .url file '{url_path}': {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------

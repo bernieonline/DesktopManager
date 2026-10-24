@@ -24,8 +24,8 @@ The `pyshortcuts` package is listed as a dependency but is never imported. `.lnk
 The original design called for a semi-transparent background (`rgba(18, 18, 18, 160)`) so the desktop wallpaper bleeds through. This was removed during DnD debugging (suspected cause — later ruled out; TeraCopy was the actual blocker). The window now uses `WA_NoSystemBackground` + `setMask()` for rounded corners and a solid `QColor(18, 18, 18)` background.
 **To restore:** Remove `WA_NoSystemBackground` and `setMask()`, add back `WA_TranslucentBackground`, restore alpha in paintEvent. Should work now that the real DnD issues are fixed.
 
-### .url (web shortcut) files may lose their icon when dragged into the shop window
-**(unverified)** — Mentioned in the task brief but no evidence of the issue or a fix was found in the codebase. The current `_handle_drop()` code resolves `.lnk` targets but has no special handling for `.url` files. Web shortcut icons are typically stored as references in the `.url` file itself; when the app creates a new `.lnk` pointing to the same target, the icon may not carry over. Needs investigation.
+### ~~.url (web shortcut) files may lose their icon when dragged into the shop window~~
+**Fixed.** Icon caching at drop time preserves favicons for `.url` files and custom `IconLocation` for `.lnk` files. `.url` files are now parsed for their URL so the shortcut works without the original file. See decisions-log.md for details.
 
 ### Tests are manual scripts, not a proper test suite
 **Files:** `tests/test_config_manager.py`, etc.
@@ -70,35 +70,32 @@ Convert manual test scripts to pytest. Add tests for:
 ### 3. Restore window translucency
 Add back `WA_TranslucentBackground` now that DnD root cause is confirmed. This gives the designed aesthetic (wallpaper bleed-through behind the dark overlay).
 
-### 4. .url / web shortcut support
-Investigate and fix icon handling for `.url` files dragged into the shop window. May need to read the `.url` file's `IconFile` and `IconIndex` fields and apply them to the created `.lnk`.
-
-### 5. Safe mode
+### 4. Safe mode
 Implement crash detection: write a "starting" flag before desktop sync, clear it after success. If the flag exists on next startup, skip desktop operations and open the config panel.
 
-### 6. Revalidation button
+### 5. Revalidation button
 Add a "Recheck Paths" action to the shop window (footer or manage panel) that re-runs `ShortcutValidator` on demand.
 
-### 7. Phase 3 — Multi-machine export/import with path adjustment wizard
+### 6. Phase 3 — Multi-machine export/import with path adjustment wizard
 - Export profile to JSON
 - Import on a new machine
 - For each shortcut path that doesn't exist locally: prompt user to pick the correct location via folder picker
 - Auto-confirm paths that exist
 - Network paths: confirm once
 
-### 8. Installer reconciliation
+### 7. Installer reconciliation
 Decide whether installed builds should use Registry Run key or Task Scheduler. Test the Run key approach with frozen .exe builds. If it works, keep it (simpler). If not, have the NSIS installer create a Task Scheduler task.
 
-### 9. System tray integration
+### 8. System tray integration
 Consider adding a system tray icon so the app has a persistent presence and can be accessed without the Desktop shortcut. Would also provide a natural place for a "Quit" action.
 
-### 10. Shortcut editing
+### 9. Shortcut editing
 Allow renaming shortcuts and changing their target path without removing and re-adding.
 
-### 11. Conditional shortcuts
+### 10. Conditional shortcuts
 Only show shortcuts for apps that are actually installed. If a shortcut's target doesn't exist, offer to hide it instead of just showing a red status dot.
 
-### 12. Desktop background per desktop (shop window integration)
+### 11. Desktop background per desktop (shop window integration)
 The control panel can set wallpapers, but the shop window has no wallpaper UI. Consider adding a wallpaper selector to the manage panel.
 
 ---

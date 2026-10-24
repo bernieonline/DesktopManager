@@ -28,7 +28,8 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QCursor
 from src.core.config_manager import ConfigManager
 from src.core.virtual_desktop_manager import VirtualDesktopManager
 from src.core.shortcut_manager import (
-    validate_path, extract_lnk_target, get_display_name, create_lnk, DESKTOP_DIR
+    validate_path, extract_lnk_target, get_display_name, create_lnk,
+    cache_icon, parse_url_file, DESKTOP_DIR
 )
 from src.core.shortcut_validator import ShortcutValidator
 from src.ui.shortcut_tile import ShortcutTile, REORDER_MIME
@@ -746,6 +747,17 @@ class ShopWindow(QWidget):
         }
         self.config.add_shortcut(self._active_desktop["id"], shortcut)
         self._active_desktop = self.config.get_desktop_by_id(self._active_desktop["id"])
+
+        # Cache icon for the newly added shortcut
+        shortcuts = self._active_desktop.get("shortcuts", [])
+        added_sc = shortcuts[-1] if shortcuts else None
+        if added_sc and os.path.isfile(target_path):
+            cached = cache_icon(target_path, added_sc["id"])
+            if cached:
+                added_sc["icon_cache"] = cached
+                self.config.save_profile()
+                self._active_desktop = self.config.get_desktop_by_id(self._active_desktop["id"])
+
         self._render_body()
         self._refresh_manage_list()
 
@@ -1024,10 +1036,12 @@ class ShopWindow(QWidget):
             logger.info(f"Shortcuts reordered for desktop '{desktop_id}'")
 
     def _handle_drop(self, path: str):
-        """Process a single dropped path — .lnk or any file/folder."""
+        """Process a single dropped path — .lnk, .url, or any file/folder."""
         original_desktop_path: str | None = None
+        icon_source_path: str = path  # file to extract the icon from (before resolving)
 
-        if path.lower().endswith(".lnk"):
+        lower = path.lower()
+        if lower.endswith(".lnk"):
             resolved = extract_lnk_target(path)
             # If the .lnk lives on the shared desktop, remember it for removal prompt
             try:
@@ -1035,7 +1049,25 @@ class ShopWindow(QWidget):
                     original_desktop_path = path
             except Exception:
                 pass
+            icon_source_path = path  # capture icon from original .lnk (custom IconLocation)
             target_path = resolved if resolved else path
+        elif lower.endswith(".url"):
+            # Web shortcut — extract the URL so the shortcut works without the .url file
+            url = parse_url_file(path)
+            if not url:
+                QMessageBox.warning(
+                    self, "Invalid Shortcut",
+                    f"Could not read URL from:\n{os.path.basename(path)}"
+                )
+                return
+            icon_source_path = path  # capture favicon from original .url file
+            target_path = url
+            # If the .url lives on the shared desktop, offer removal
+            try:
+                if os.path.normcase(os.path.dirname(path)) == os.path.normcase(DESKTOP_DIR):
+                    original_desktop_path = path
+            except Exception:
+                pass
         else:
             target_path = path
 
@@ -1057,7 +1089,7 @@ class ShopWindow(QWidget):
             )
             return
 
-        auto_name = get_display_name(target_path)
+        auto_name = get_display_name(path)  # use original filename, not resolved URL
         dialog = NameConfirmDialog(auto_name, target_path, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
@@ -1074,12 +1106,24 @@ class ShopWindow(QWidget):
         }
         self.config.add_shortcut(self._active_desktop["id"], shortcut)
         self._active_desktop = self.config.get_desktop_by_id(self._active_desktop["id"])
+
+        # Cache the icon from the original dropped file (before it might be deleted).
+        # add_shortcut() auto-assigns an id; the last shortcut in the list is the one we just added.
+        shortcuts = self._active_desktop.get("shortcuts", [])
+        added_sc = shortcuts[-1] if shortcuts else None
+        if added_sc and os.path.isfile(icon_source_path):
+            cached = cache_icon(icon_source_path, added_sc["id"])
+            if cached:
+                added_sc["icon_cache"] = cached
+                self.config.save_profile()
+                self._active_desktop = self.config.get_desktop_by_id(self._active_desktop["id"])
+
         self._render_body()
         self._refresh_manage_list()
 
         logger.info(f"_handle_drop: added '{label}' → {target_path}")
 
-        # Offer to remove the original .lnk from the shared desktop
+        # Offer to remove the original shortcut from the shared desktop
         if original_desktop_path:
             reply = QMessageBox.question(
                 self, "Remove Original",

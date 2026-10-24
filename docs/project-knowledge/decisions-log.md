@@ -145,8 +145,18 @@ Newest first. Each entry records what was decided, why, and what alternatives we
 
 ---
 
-### .url shortcut icon loss on drag-and-drop
-**(unverified)** — This issue was mentioned in the task request but no evidence of it was found in the git history, code comments, or session context documents. The current `_handle_drop()` code in `shop_window.py` resolves `.lnk` targets but has no special handling for `.url` (web shortcut) files. If this issue existed and was fixed, the fix is not documented in the codebase as reviewed. It's possible the issue was observed but not yet addressed, or was resolved in a way not captured in commits.
+### Icon caching for .url and custom-icon .lnk files
+**Decision:** Cache the shell icon of the **original dropped file** as a PNG at drop time, store the path in the profile's `icon_cache` field, and prefer it in `ShortcutTile._load_icon()`.
+**Why:** Two classes of shortcuts lost their icon:
+1. `.url` (web shortcut) files — the favicon is only accessible while the `.url` file exists. If the user accepts the "Remove original from Desktop?" prompt, the file is gone and the icon falls back to a generic file icon.
+2. Chrome/Edge "Install as app" `.lnk` files — these have a custom `IconLocation` pointing to a cached favicon. `_handle_drop()` resolved the `.lnk` to its target (`chrome_proxy.exe`), so `get_shell_icon()` showed the generic `.exe` icon instead of the web app's icon.
+**Implementation:**
+- `cache_icon(source_path, shortcut_id)` in `shortcut_manager.py` saves a 256px PNG to `%LOCALAPPDATA%\DesktopWorkspaces\icons\{shortcut_id}.png`.
+- `parse_url_file(url_path)` reads the URL from `.url` files (INI format) so `os.startfile()` can open the URL directly without the original file.
+- `_handle_drop()` caches the icon from the original dropped file before the removal prompt.
+- `_on_add_shortcut()` also caches icons for files added via the dialog.
+- `ShortcutTile._load_icon()` checks `icon_cache` first; falls back to live `get_shell_icon()`.
+- `SHORTCUT_SCHEMA` includes `icon_cache` as an optional field.
 
 ---
 

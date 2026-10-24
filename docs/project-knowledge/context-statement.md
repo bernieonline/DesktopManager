@@ -125,6 +125,7 @@ D:\DesktopProject\
 | Profile backup (auto) | `%LOCALAPPDATA%\DesktopWorkspaces\profile.json.bak` |
 | Pre-import backups | `%LOCALAPPDATA%\DesktopWorkspaces\profile_before_import_TIMESTAMP.json.bak` |
 | Shortcut .lnk files | `%LOCALAPPDATA%\DesktopWorkspaces\shortcuts\{desktop_id}\` |
+| Cached icons (PNG) | `%LOCALAPPDATA%\DesktopWorkspaces\icons\{shortcut_id}.png` |
 | Wallpapers (local copies) | `%LOCALAPPDATA%\DesktopWorkspaces\wallpapers\` |
 | Logs | `%LOCALAPPDATA%\DesktopWorkspaces\logs\app.log` (+ rotated backups) |
 | Control Panel shortcut | `%USERPROFILE%\Desktop\Desktop Workspaces.lnk` (or OneDrive Desktop) |

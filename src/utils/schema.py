@@ -30,6 +30,7 @@ SHORTCUT_SCHEMA = {
         "status":     {"type": ["string", "null"],
                        "enum": ["available", "unavailable", "dead", None]},
         "created_at": {"type": ["string", "null"]},
+        "icon_cache": {"type": ["string", "null"]},
     },
 }
 
