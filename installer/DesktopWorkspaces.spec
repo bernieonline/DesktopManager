@@ -25,6 +25,7 @@ HIDDEN_IMPORTS = [
     "win32api",
     "win32con",
     "win32gui",
+    "win32ui",
     "win32com",
     "win32com.shell",
     "win32com.shell.shell",
