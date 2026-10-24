@@ -39,6 +39,8 @@ D:\DesktopProject\
                                    #   sync_desktops() is match-only — does NOT auto-create or delete.
       shortcut_manager.py          # Create/delete .lnk files via WScript.Shell, validate paths (with
                                    #   timeout for network), extract shell icons, place Control Panel shortcut on Desktop.
+                                   #   Icon caching: cache_icon() saves shell icons as PNG via SHGetFileInfo/pywin32.
+                                   #   .url parsing: parse_url_file() reads URL from web shortcut files.
       shortcut_validator.py        # QThread that validates all shortcut paths in background, emits per-shortcut
                                    #   signals so the shop window can update status dots incrementally.
       startup_executor.py          # Runs on logon: loads profile, syncs desktops, sets wallpapers, places
@@ -48,8 +50,8 @@ D:\DesktopProject\
       shop_window.py               # The main UI. Frameless overlay, top-right of screen, shows current desktop's
                                    #   shortcuts as a 3-column tile grid. OLE drag-and-drop, manage panel, backup/import.
                                    #   ~1100 lines — the largest and most complex module.
-      shortcut_tile.py             # Single clickable tile: 116x104 px, shell icon, label, status dot, hover
-                                   #   highlight, click-to-launch, press-and-hold drag-to-reorder.
+      shortcut_tile.py             # Single clickable tile: 116x104 px, shell icon (prefers cached PNG),
+                                   #   label, status dot, hover highlight, click-to-launch, press-and-hold drag-to-reorder.
       control_panel.py             # Full QMainWindow management UI (Phase 1). Desktop cards, add/delete/enable
                                    #   desktops, set wallpapers, diagnostics. Accessible via --control-panel flag.
       desktop_card.py              # Per-desktop card widget used in control_panel.py. Shows name, enabled
@@ -65,6 +67,7 @@ D:\DesktopProject\
                                    #   TimedRotatingFileHandler, midnight rotation, 7-day retention.
       schema.py                    # PROFILE_SCHEMA (jsonschema), validate_profile(), repair_profile().
                                    #   All profile load/save operations validate through here.
+                                   #   Shortcut fields: id, label, type, path, lnk_path, status, created_at, icon_cache.
 
   tests/
     test_config_manager.py         # Manual test script for ConfigManager CRUD (not pytest).
@@ -102,8 +105,10 @@ D:\DesktopProject\
 - **Remove shortcut**: via manage panel, with confirmation
 - **Drag-and-drop**: OLE IDropTarget — drag files/folders from Explorer into the shop window
   - .lnk files resolve to their target automatically
-  - .lnk from shared Desktop: prompt to remove original after adding
+  - .url (web shortcut) files: URL extracted so shortcut works without original file
+  - .lnk/.url from shared Desktop: prompt to remove original after adding
   - Deduplication: already-added paths are rejected with a message
+  - Icon caching: shell icon saved as PNG at drop time (preserves favicons and custom IconLocation)
 - **Drag-to-reorder**: press-and-hold (300ms) a tile, then drag to rearrange
   - Drop indicator line shows insertion point
   - Saves new order to profile immediately
@@ -173,7 +178,7 @@ ShopWindow (QWidget, frameless, Tool window type)
   |    -> Press-and-hold 300ms: drag-to-reorder (internal QDrag with custom MIME)
   |
   |- OLE drag-and-drop (IDropTarget)
-  |    -> Files/folders from Explorer: resolve .lnk targets, show NameConfirmDialog, add to profile
+  |    -> Files/folders from Explorer: resolve .lnk targets, parse .url files, cache icons, add to profile
   |    -> CRITICAL: app must run non-elevated or UIPI blocks drops from Explorer
   |
   |- Manage panel (expandable)
@@ -200,4 +205,4 @@ ConfigManager
 
 ---
 
-*Generated 2026-10-24 from codebase at commit b6e87db*
+*Updated 2026-10-24 at commit 5889c55*

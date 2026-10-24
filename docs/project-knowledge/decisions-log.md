@@ -151,13 +151,19 @@ Newest first. Each entry records what was decided, why, and what alternatives we
 1. `.url` (web shortcut) files — the favicon is only accessible while the `.url` file exists. If the user accepts the "Remove original from Desktop?" prompt, the file is gone and the icon falls back to a generic file icon.
 2. Chrome/Edge "Install as app" `.lnk` files — these have a custom `IconLocation` pointing to a cached favicon. `_handle_drop()` resolved the `.lnk` to its target (`chrome_proxy.exe`), so `get_shell_icon()` showed the generic `.exe` icon instead of the web app's icon.
 **Implementation:**
-- `cache_icon(source_path, shortcut_id)` in `shortcut_manager.py` saves a 256px PNG to `%LOCALAPPDATA%\DesktopWorkspaces\icons\{shortcut_id}.png`.
+- `cache_icon(source_path, shortcut_id)` in `shortcut_manager.py` saves a PNG to `%LOCALAPPDATA%\DesktopWorkspaces\icons\{shortcut_id}.png`.
+- Icon extraction chain: `.url` IconFile → `.lnk` IconLocation → `SHGetFileInfoW` → `QFileIconProvider` (fallback).
 - `parse_url_file(url_path)` reads the URL from `.url` files (INI format) so `os.startfile()` can open the URL directly without the original file.
 - `_handle_drop()` caches the icon from the original dropped file before the removal prompt.
 - `_on_add_shortcut()` also caches icons for files added via the dialog.
 - `ShortcutTile._load_icon()` checks `icon_cache` first; falls back to live `get_shell_icon()`.
 - `SHORTCUT_SCHEMA` includes `icon_cache` as an optional field.
+**Pitfalls encountered:**
+- `QFileIconProvider` does NOT read custom icon metadata from `.url`/`.lnk` files — returns generic file-type icons only.
+- `SHGetFileInfoW` requires backslash-normalised paths (`os.path.normpath`) — forward slashes cause silent failure (returns 0).
+- HICON-to-QPixmap via raw ctypes failed with `OverflowError: int too long to convert` on 64-bit handles. Fixed by using pywin32 (`win32gui.DrawIconEx` into a DIB section) instead of raw ctypes `GetObjectW`.
+**Commit:** `5889c55` Add icon caching for .url and custom-icon .lnk shortcuts
 
 ---
 
-*Generated 2026-10-24 from codebase at commit b6e87db*
+*Updated 2026-10-24 at commit 5889c55*
